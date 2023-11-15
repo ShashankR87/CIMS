@@ -22,6 +22,9 @@ import cv2
 
 # TODO: Create requirements.txt
 
+COLLISION_PENALTY = 10_000
+DESTINATION_REWARD = 1000
+
 N_CARS = 2
 VEHICLE_MODEL = 'vehicle.jeep.wrangler_rubicon'
 A_MIN = 0
@@ -89,6 +92,7 @@ class CarlaEnv:
         self.spawn_points = self.get_spawn_points()
         self.traffic_manager = self.client.get_trafficmanager(2000)  # Making it class attribute so we can use it in multiple places
         self.vehicles = []
+        self.collision = False
 
         # settings = world.get_settings()
         # settings.synchronous_mode = True # Enables synchronous mode
@@ -169,14 +173,15 @@ class CarlaEnv:
     def spawn_n_cars(self):
         for i in N_CARS:
             path = None          # TODO: Shashank
-            
+
             carla_car = self.spawn_vehicle(path.start_point)
             acc =  np.random.randint(A_MIN, A_MAX)
             vel = acc * T
             vehicle_data = {"carla_car": carla_car, 
                             "path": path, 
                             "acc": acc,
-                            "vel": vel}
+                            "vel": vel,
+                            "total_time": -1}
             
             self.vehicles.append(vehicle_data)
 
@@ -199,21 +204,29 @@ class CarlaEnv:
         self.episode_step = 0
         return  
 
+
     def step(self, acc_list):
         '''Apply respective acceleration for each car'''
 
         self.episode_step += 1
         self.action(acc_list)
 
-        if collision:
+        done = False
+        if self.collision:
             reward = -self.ENEMY_PENALTY
+            done = True
 
-        elif car1 reaches destination:
-            reward = self._REWARD
-        
+        else:
+            # the reward for completion is inversely proportional to the total time it took to traverse the intersection
+            reached_destination = [car for car in self.vehicles if car["total_time"]>0]
+            rewards_reached_destination = [DESTINATION_REWARD * (1 / car["total_time"]) for car in reached_destination]
+            reward += sum(rewards_reached_destination)
+            
+            if len(reached_destination) == len(self.vehicles):
+                done = True
 
-        
-
+        # TODO: revisit if done is useful or not
+        return reward, done
 
 
 def main():
