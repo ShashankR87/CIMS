@@ -1,16 +1,56 @@
 import carla 
 import glob
-import logging
-import math 
 import os
 import random 
 import sys
 import time
+import numpy as np
+import numpy as np
+import keras.backend.tensorflow_backend as backend
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, Conv2D, MaxPooling2D, Activation, Flatten
+from keras.optimizers import Adam
+from keras.callbacks import TensorBoard
+import tensorflow as tf
+from collections import deque
+import time
+import random
+from tqdm import tqdm
+import os
+from PIL import Image
+import cv2
 
-# TODO: Make Requirements.txt
+# TODO: Create requirements.txt
 
+N_CARS = 2
 VEHICLE_MODEL = 'vehicle.jeep.wrangler_rubicon'
+A_MIN = 0
+A_MAX = 10
+ACTION_SPACE_SIZE = 10
+T = 20
 
+ACC_MAP = {
+    0: -10,
+    1: -9,
+    2: -8,
+    3: -7,
+    4: -6,
+    5: -5,
+    6: -4,
+    7: -3,
+    8: -2,
+    9: -1,
+    10: 0,
+    11: 1,
+    12: 2,
+    13: 3,
+    14: 4,
+    15: 5,
+    16: 6,
+    17: 7,
+    18: 8,
+    19: 9
+}
 '''
 Paths to make car move through the intersection (Direction is relative to the fixed spectator pov)
 N->E (49, 27)
@@ -31,7 +71,7 @@ W->N (139, 56)
 '''
 
 
-class CarlaWorld:
+class CarlaEnv:
 
     def __init__(self):
         try:
@@ -48,6 +88,7 @@ class CarlaWorld:
         self.bp_lib = self.world.get_blueprint_library() 
         self.spawn_points = self.get_spawn_points()
         self.traffic_manager = self.client.get_trafficmanager(2000)  # Making it class attribute so we can use it in multiple places
+        self.vehicles = []
 
         # settings = world.get_settings()
         # settings.synchronous_mode = True # Enables synchronous mode
@@ -73,6 +114,7 @@ class CarlaWorld:
     def spawn_vehicle(self, spawn_point):
         vehicle_bp = self.bp_lib.find(VEHICLE_MODEL)
         vehicle = self.world.spawn_actor(vehicle_bp, self.spawn_points[spawn_point])
+
         return vehicle
 
     def detect_collision(self, vehicle, collision_box):
@@ -123,23 +165,76 @@ class CarlaWorld:
 
         self.traffic_manager.set_path(vehicle, route)
 
+
+    def spawn_n_cars(self):
+        for i in N_CARS:
+            path = None          # TODO: Shashank
+            
+            carla_car = self.spawn_vehicle(path.start_point)
+            acc =  np.random.randint(A_MIN, A_MAX)
+            vel = acc * T
+            vehicle_data = {"carla_car": carla_car, 
+                            "path": path, 
+                            "acc": acc,
+                            "vel": vel}
+            
+            self.vehicles.append(vehicle_data)
+
+    def action(self, acc_list):
+        '''The car can take any of the ACTION_SPACE_SIZE possible throttle values from A_MIN to A_MAX'''
+
+        for i, car_dict in enumerate(self.vehicles):
+            throttle = np.clip(acc_list[i] / ACTION_SPACE_SIZE, 0, 1)
+            act = carla.VehicleControl(throttle=float(throttle))
+            car_dict["carla_car"].apply_control(act)
+
+    def destroy_all_cars(self):
+        for car in self.vehicles:
+            car["carla_car"].destroy()
+
+
+    def reset(self):
+        self.destroy_all_cars()
+        self.spawn_n_cars()
+        self.episode_step = 0
+        return  
+
+    def step(self, acc_list):
+        '''Apply respective acceleration for each car'''
+
+        self.episode_step += 1
+        self.action(acc_list)
+
+        if collision:
+            reward = -self.ENEMY_PENALTY
+
+        elif car1 reaches destination:
+            reward = self._REWARD
+        
+
+        
+
+
+
 def main():
 
     # carla setup
-    carla_world = CarlaWorld()
+    carla_env = CarlaEnv()
 
     # fix spectator on top of intersection
-    carla_world.spectator_setup(x=-47, y=16.8, z=60)
+    carla_env.spectator_setup(x=-47, y=16.8, z=60)
 
-    vehicle = carla_world.spawn_vehicle(spawn_point=28)
+    agent = DQN()
+
+    run_episodes(agent)
 
     # Control car by varying throttle manually
-    carla_world.control_manual(vehicle, spawn_point_collision=79)
+    carla_env.control_manual(vehicle, spawn_point_collision=79)
     vehicle.destroy()
 
     # Control car using traffic manager with custom path
-    vehicle = carla_world.spawn_vehicle(spawn_point=50)
-    carla_world.control_traffic_manager(vehicle, a=50, b=67)
+    vehicle = carla_env.spawn_vehicle(spawn_point=50)
+    carla_env.control_traffic_manager(vehicle, a=50, b=67)
     vehicle.destroy()
 
 
