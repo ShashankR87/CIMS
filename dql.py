@@ -99,7 +99,7 @@ class DQL:
 
 
     # Adds step's data to a memory replay array
-    # (observation space, action, reward, new observation space, done)
+    # (observation space, action, reward)
     def update_replay_memory(self, transition):
         self.replay_memory.append(transition)
 
