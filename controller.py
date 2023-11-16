@@ -1,3 +1,4 @@
+from datetime import datetime
 import carla 
 import glob
 import os
@@ -12,6 +13,10 @@ import time
 import random
 from tqdm import tqdm
 import os
+from PIL import Image
+import cv2
+import threading
+import math
 
 from dql import DQL
 
@@ -33,31 +38,28 @@ COLLISION_PENALTY = 10_000
 DESTINATION_REWARD = 1000
 N_CARS = 2
 VEHICLE_MODEL = 'vehicle.jeep.wrangler_rubicon'
-A_MIN = -10
-A_MAX = 10
 T = 20
 
 ACC_MAP = {i: i - 10 for i in range(20)}   # {0: -10, 1: -9, ... 18: 8, 19: 9}
 ACTION_SPACE_SIZE = len(ACC_MAP)           # 20
+V_MIN = 5
+V_MAX = 30
 
-'''
-Paths to make car move through the intersection (Direction is relative to the fixed spectator pov)
-N->E (49, 27)
-N->S (49, 3)
-N->W (50, 67)
 
-E->N (28, 57)
-E->S (137, 77)
-E->W (28, 95)
-
-S->E (85, 26)
-S->N (80, 56)
-S->W (80, 95)
-
-W->S (138, 2)
-W->E (139, 27)
-W->N (139, 56)
-'''
+TRAJECTORIES = [                                            
+    (139, [390, 298, 431, 429, 508, 435, 495, 343, 351]),
+    (138, [389, 299, 664]),
+    (138, [389, 299, 501, 500, 327, 323, 315]),
+    (50, [353, 341, 487, 262, 336, 296, 392]),
+    (50, [353, 341, 315]),
+    (49, [352, 340, 436, 435, 492, 423, 663]),
+    (28, [671, 328, 472, 473, 338, 342 ,350]),
+    (28, [671, 328, 392]),
+    (29, [672, 329, 289, 493, 508, 482, 314]),
+    (85, [312, 488, 490, 426, 424, 287, 664]),
+    (85, [312, 488, 350]),
+    (80, [313, 489, 491, 427, 82, 512, 337, 391])
+]                                                           #(spawn_point_index, [waypoint indicies])
 
 
 class CarlaEnv:
@@ -76,10 +78,10 @@ class CarlaEnv:
         self.world = self.client.get_world()
         self.bp_lib = self.world.get_blueprint_library() 
         self.spawn_points = self.get_spawn_points()
-        self.traffic_manager = self.client.get_trafficmanager(2000)  # Making it class attribute so we can use it in multiple places
+        self.waypoints = self.world.get_map().generate_waypoints(10)
         self.vehicles = []
         self.collision = False
-
+        self.sim_time = 0
         # settings = world.get_settings()
         # settings.synchronous_mode = True # Enables synchronous mode
         # # settings.fixed_delta_seconds = 0.05
@@ -93,11 +95,12 @@ class CarlaEnv:
         spectator.set_transform(transform)
 
 
-    def get_spawn_points(self):
+    def get_spawn_points(self, show=False):
         # get spawn points and label them on the map
         spawn_points = self.world.get_map().get_spawn_points()
-        for i, spawn_point in enumerate(spawn_points):
-            self.world.debug.draw_string(spawn_point.location, str(i), life_time=1000)
+        if show:
+            for i, spawn_point in enumerate(spawn_points):
+                self.world.debug.draw_string(spawn_point.location, str(i), life_time=1000)
         return spawn_points
 
 
@@ -107,69 +110,93 @@ class CarlaEnv:
         # TODO: Attach collision detector and add callback function that sets self.collision to True
         return vehicle
 
-    def detect_collision(self, vehicle, collision_box):
-        if  ((vehicle.get_location().x >= collision_box.location.x - 1) and \
-            (vehicle.get_location().x <= collision_box.location.x + 1)) and \
-            ((vehicle.get_location().y >= collision_box.location.y - 1) and \
-            (vehicle.get_location().y <= collision_box.location.y + 1)):
-                print('reached')
-                print(str(vehicle.get_location().x), ' ', str(vehicle.get_location().y))
-                return True
-        return False
-    
-
-    def control_manual(self, vehicle, spawn_point_collision):
-        vehicle.apply_control(carla.VehicleControl(throttle = 1.0))
-
-        counter = 0
-        while True:
-            counter += 1
-        #     if counter % 1000 == 0:
-        #         print(str(vehicle1.get_location().x) + ' ' + str(vehicle1.get_location().y))
-            if self.detect_collision(vehicle, self.spawn_points[spawn_point_collision]):
-                vehicle.apply_control(carla.VehicleControl(hand_brake = True))
-                break
-
-        time.sleep(50)
-
-
-    def control_traffic_manager(self, vehicle, a, b):
-        route = [self.spawn_points[a].location, self.spawn_points[b].location]
-
-        # Set all traffic lights in the map to green
-        list_actor = self.world.get_actors()
-        for actor_ in list_actor:
-            if isinstance(actor_, carla.TrafficLight):
-                actor_.set_state(carla.TrafficLightState.Green) 
-                actor_.set_green_time(1000.0)
-
-        vehicle.set_autopilot(True)
-
-        self.traffic_manager.update_vehicle_lights(vehicle, True)
-        self.traffic_manager.random_left_lanechange_percentage(vehicle, 0)
-        self.traffic_manager.random_right_lanechange_percentage(vehicle, 0)
-        self.traffic_manager.auto_lane_change(vehicle, False)
-        self.traffic_manager.ignore_lights_percentage(vehicle, 100)
-        self.traffic_manager.ignore_vehicles_percentage(vehicle, 100)
-        self.traffic_manager.ignore_signs_percentage(vehicle, 100)
-
-        self.traffic_manager.set_path(vehicle, route)
+    def handle_collision(self, event):
+        self.collision = True
+        
+    def create_path(self, trajectory):
+        path = []
+        waypoints = [self.waypoints[w].transform.location for w in trajectory]
+        for waypoint in waypoints:
+            path.append(carla.Location(x=waypoint.x, y=waypoint.y, z=1))
+        return path
 
 
     def spawn_n_cars(self):
+        chosen_directions = []
         for i in N_CARS:
-            path = None          # TODO: Shashank
+            direction = random.randint(0, 3)
+            while direction in chosen_directions:
+                direction = random.randint(0, 3)
+            chosen_directions.append(direction)
+            
+            trajectory = random.choice(TRAJECTORIES[:chosen_directions*3] + TRAJECTORIES[chosen_directions*3 + 3:])
+            path = self.create_path(trajectory[1])
 
-            carla_car = self.spawn_vehicle(path.start_point)
-            acc =  np.random.randint(A_MIN, A_MAX)
-            vel = acc * T
-            vehicle_data = {"carla_car": carla_car, 
-                            "path": path, 
-                            "acc": acc,
-                            "vel": vel,
-                            "total_time": -1}
+            car_actor = self.spawn_vehicle(trajectory[0])
+            collision_sensor_bp = self.bp_lib.find("sensor.other.collision")
+            collision_transform = carla.Transform(carla.Location(x=2.5, x=0.7))
+            collision_sensor = self.world.spawn_actor(collision_sensor_bp, collision_transform, attach_to=car_actor)
+            collision_sensor.listen(lambda event: self.handle_collision(event))
+
+            velocity = random.randint(V_MIN, V_MAX)
+            
+            vehicle_data = {
+                "carla_car": car_actor, 
+                "path": path,
+                "path_idx": TRAJECTORIES.index(trajectory),
+                "velocity": velocity,
+                "collision_sensor": collision_sensor
+            }
             
             self.vehicles.append(vehicle_data)
+
+
+    def calculate_yaw_angle_to_target(self, current_location, target_location):
+        direction_vector = target_location - current_location
+        angle_radians = math.atan2(direction_vector.y, direction_vector.x)
+        angle_degrees = math.degrees(angle_radians)
+        return angle_degrees
+
+    # Function to orient the vehicle towards a target point
+    def orient_vehicle_towards_target(self, vehicle, target_point):
+        current_location = vehicle.get_location()
+        yaw_angle = self.calculate_yaw_angle_to_target(current_location, target_point)
+        vehicle.set_transform(carla.Transform(current_location, carla.Rotation(yaw=yaw_angle)))
+
+    def calculate_target_direction_degrees(self, start_point, end_point):
+        delta_x = end_point.x - start_point.x
+        delta_y = end_point.y - start_point.y
+
+        # Calculate the angle in radians using arctangent
+        angle_radians = math.atan2(delta_y, delta_x)
+
+        # Convert radians to degrees
+        angle_degrees = math.degrees(angle_radians)
+
+        # Ensure the angle is in the range [0, 360)
+        angle_degrees = (angle_degrees + 360) % 360
+
+        return angle_degrees
+
+    def follow_path_with_velocity(self, vehicle_data, car_idx, throttle):
+        cnt = 0
+        vehicle = vehicle_data["carla_car"]
+        path = vehicle_data["path"]
+        velocity = vehicle_data["vehicle"]
+        start_time = datetime.now()
+        for location in path:
+            direction = location - vehicle.get_location()
+            target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
+            target_direction_radians = math.radians(target_direction_degrees)
+            target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
+            self.orient_vehicle_towards_target(vehicle, location)
+            if cnt > 1:
+                vehicle.apply_control(carla.VehicleControl(throttle = throttle))
+            else:
+                vehicle.set_target_velocity(target_velocity_vector)
+            cnt += 1
+            time.sleep(direction.length() / velocity)
+        self.vehicles[car_idx]["total_time"] = (datetime.now() - start_time).total_seconds()
 
     def action(self, acc_list):
         '''The car can take any of the ACTION_SPACE_SIZE possible throttle values from A_MIN to A_MAX'''
@@ -177,31 +204,35 @@ class CarlaEnv:
         # TODO: This is when we run the entire simulation by applying respective accelerations 
         # and update self.collisions and car["total_time"] for each car
 
+        thread_list = []
         for i, car_dict in enumerate(self.vehicles):
             throttle = np.clip(acc_list[i] / ACTION_SPACE_SIZE, 0, 1)
-            act = carla.VehicleControl(throttle=float(throttle))
-            car_dict["carla_car"].apply_control(act)
+            thread_list.append(threading.Thread(target=self.follow_path_with_velocity, args=(car_dict, i , float(throttle))))
+        
+        for t in thread_list:
+            t.start()
+        for t in thread_list:
+            t.join()
+        
 
-
-    def destroy_all_cars(self):
+    def destroy_all_actors(self):
         for car in self.vehicles:
             car["carla_car"].destroy()
+            car["collision_sensor"].destroy()
 
 
     def reset(self):
-        '''Returns array [v_1, p_1, v_2, p_2, ...v_n, p_n]'''
-
-        self.destroy_all_cars()
+        self.destroy_all_actors()
         self.spawn_n_cars()
         self.episode_step = 0
-        current_state = []
+        self.collision = False
+        self.sim_time = 0
 
-        for car in self.vehicles:
-            current_state.append(car["vel"])
-            current_state.append(car["path"])
-
-        return current_state
-
+        state = []
+        for v in self.vehicles:
+            state.append([v["path_idx"]])
+            state.append([v["velocity"]])
+        return np.array([state])
 
     def step(self, acc_list):
         '''Apply respective acceleration for each car'''
@@ -216,7 +247,7 @@ class CarlaEnv:
             # the reward for completion is inversely proportional to the total time it took to traverse the intersection
             reached_destination = [car for car in self.vehicles if car["total_time"]>0]
             rewards_reached_destination = [DESTINATION_REWARD * (1 / car["total_time"]) for car in reached_destination]
-            reward += sum(rewards_reached_destination)
+            reward = sum(rewards_reached_destination)
 
         return reward
 
@@ -289,15 +320,6 @@ def main():
         os.makedirs('models')
 
     carla_env.run_episodes(agent)
-
-    # Control car by varying throttle manually
-    carla_env.control_manual(vehicle, spawn_point_collision=79)
-    vehicle.destroy()
-
-    # Control car using traffic manager with custom path
-    vehicle = carla_env.spawn_vehicle(spawn_point=50)
-    carla_env.control_traffic_manager(vehicle, a=50, b=67)
-    vehicle.destroy()
 
 
 if __name__ == "__main__":
