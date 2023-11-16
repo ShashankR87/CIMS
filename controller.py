@@ -23,11 +23,17 @@ epsilon = 1  # not a constant, going to be decayed
 EPSILON_DECAY = 0.99975
 MIN_EPSILON = 0.001
 
+#  Stats settings
+AGGREGATE_STATS_EVERY = 50  # episodes
+SHOW_PREVIEW = False
+MIN_REWARD = -200  # For model save
+
+
 COLLISION_PENALTY = 10_000
 DESTINATION_REWARD = 1000
 N_CARS = 2
 VEHICLE_MODEL = 'vehicle.jeep.wrangler_rubicon'
-A_MIN = 0
+A_MIN = -10
 A_MAX = 10
 T = 20
 
@@ -98,7 +104,7 @@ class CarlaEnv:
     def spawn_vehicle(self, spawn_point):
         vehicle_bp = self.bp_lib.find(VEHICLE_MODEL)
         vehicle = self.world.spawn_actor(vehicle_bp, self.spawn_points[spawn_point])
-
+        # TODO: Attach collision detector and add callback function that sets self.collision to True
         return vehicle
 
     def detect_collision(self, vehicle, collision_box):
@@ -168,10 +174,14 @@ class CarlaEnv:
     def action(self, acc_list):
         '''The car can take any of the ACTION_SPACE_SIZE possible throttle values from A_MIN to A_MAX'''
 
+        # TODO: This is when we run the entire simulation by applying respective accelerations 
+        # and update self.collisions and car["total_time"] for each car
+
         for i, car_dict in enumerate(self.vehicles):
             throttle = np.clip(acc_list[i] / ACTION_SPACE_SIZE, 0, 1)
             act = carla.VehicleControl(throttle=float(throttle))
             car_dict["carla_car"].apply_control(act)
+
 
     def destroy_all_cars(self):
         for car in self.vehicles:
@@ -199,74 +209,61 @@ class CarlaEnv:
         self.episode_step += 1
         self.action(acc_list)
 
-        done = False
         if self.collision:
             reward = -self.ENEMY_PENALTY
-            done = True
 
         else:
             # the reward for completion is inversely proportional to the total time it took to traverse the intersection
             reached_destination = [car for car in self.vehicles if car["total_time"]>0]
             rewards_reached_destination = [DESTINATION_REWARD * (1 / car["total_time"]) for car in reached_destination]
             reward += sum(rewards_reached_destination)
-            
-            if len(reached_destination) == len(self.vehicles):
-                done = True
 
-        # TODO: revisit if done is useful or not
-        return reward, done
+        return reward
 
 
 
     def run_episodes(self, agent):
+        
+        rewards = [0]
             
         for episode in tqdm(range(1, EPISODES + 1), ascii=True, unit='episodes'):
 
             agent.tensorboard.step = episode
             episode_reward = 0
-            step = 1
 
-            # Reset environment and get initial state
-            current_state = self.reset()
+            # Reset environment and get initial state 
+            state = self.reset()
 
-            done = False
-            while not done:
-                if np.random.random() > epsilon:
-                    # Get action from Q table - each action value should be an integer from 0 to 19
-                    action1 = np.argmax(agent.get_qs(current_state)[:ACTION_SPACE_SIZE])
-                    action2 = np.argmax(agent.get_qs(current_state)[ACTION_SPACE_SIZE:])
-                    action = [action1, action2]
-                else:
-                    # Get random action
-                    action = [np.random.randint(0, self.ACTION_SPACE_SIZE),
-                              np.random.randint(0, self.ACTION_SPACE_SIZE)]
+            # Choose an action 
+            if np.random.random() > epsilon:
+                # Get action from Q table - each action value should be an integer from 0 to 19
+                action1 = np.argmax(agent.get_qs(state)[:ACTION_SPACE_SIZE])
+                action2 = np.argmax(agent.get_qs(state)[ACTION_SPACE_SIZE:])
+                action = [action1, action2]
+            else:
+                # Get random action
+                action = [np.random.randint(0, self.ACTION_SPACE_SIZE),
+                            np.random.randint(0, self.ACTION_SPACE_SIZE)]
 
-                new_state, reward, done = self.step(action)
+            reward = self.step(action)
 
-                # Transform new continous state to new discrete state and count reward
-                episode_reward += reward
+            # if SHOW_PREVIEW and not episode % AGGREGATE_STATS_EVERY:
+            #     env.render()
 
-                # if SHOW_PREVIEW and not episode % AGGREGATE_STATS_EVERY:
-                #     env.render()
-
-                # Every step we update replay memory and train main network
-                agent.update_replay_memory((current_state, action, reward, new_state, done))
-                agent.train(done, step)
-
-                current_state = new_state
-                step += 1
+            # Every step we update replay memory and train main network
+            agent.update_replay_memory((state, action, reward))
+            agent.train()
 
             # Append episode reward to a list and log stats (every given number of episodes)
-            ep_rewards.append(episode_reward)
-            if not episode % AGGREGATE_STATS_EVERY or episode == 1:
-                average_reward = sum(ep_rewards[-AGGREGATE_STATS_EVERY:])/len(ep_rewards[-AGGREGATE_STATS_EVERY:])
-                min_reward = min(ep_rewards[-AGGREGATE_STATS_EVERY:])
-                max_reward = max(ep_rewards[-AGGREGATE_STATS_EVERY:])
-                agent.tensorboard.update_stats(reward_avg=average_reward, reward_min=min_reward, reward_max=max_reward, epsilon=epsilon)
+            rewards.append(reward)
+            average_reward = sum(rewards[-AGGREGATE_STATS_EVERY:])/len(rewards[-AGGREGATE_STATS_EVERY:])
+            min_reward = min(rewards[-AGGREGATE_STATS_EVERY:])
+            max_reward = max(rewards[-AGGREGATE_STATS_EVERY:])
+            agent.tensorboard.update_stats(reward_avg=average_reward, reward_min=min_reward, reward_max=max_reward, epsilon=epsilon)
 
-                # Save model, but only when min reward is greater or equal a set value
-                if min_reward >= MIN_REWARD:
-                    agent.model.save(f'models/{MODEL_NAME}__{max_reward:_>7.2f}max_{average_reward:_>7.2f}avg_{min_reward:_>7.2f}min__{int(time.time())}.model')
+            # Save model, but only when min reward is greater or equal a set value
+            if min_reward >= MIN_REWARD:
+                agent.model.save(f'models/{agent.model_name}__{max_reward:_>7.2f}max_{average_reward:_>7.2f}avg_{min_reward:_>7.2f}min__{int(time.time())}.model')
 
             # Decay epsilon
             if epsilon > MIN_EPSILON:
@@ -284,9 +281,9 @@ def main():
 
     agent = DQL()
 
-    random.seed(1)
-    np.random.seed(1)
-    tf.set_random_seed(1)
+    # random.seed(1)
+    # np.random.seed(1)
+    # tf.set_random_seed(1)
 
     if not os.path.isdir('models'):
         os.makedirs('models')

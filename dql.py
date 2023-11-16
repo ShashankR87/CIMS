@@ -8,18 +8,13 @@ from keras.callbacks import TensorBoard
 import tensorflow as tf
 from collections import deque
 import time
-from tqdm import tqdm
 
-
-
-MIN_REWARD = -200  # For model save
 MEMORY_FRACTION = 0.20
 
 #  Stats settings
 AGGREGATE_STATS_EVERY = 50  # episodes
 SHOW_PREVIEW = False
 
-MODEL_NAME = "4x2"
 ACTION_SPACE_SIZE = 20
 DISCOUNT = 0.99
 REPLAY_MEMORY_SIZE = 50_000  # How many last steps to keep for model training
@@ -67,6 +62,7 @@ class ModifiedTensorBoard(TensorBoard):
 class DQL:
     def __init__(self, n_agents=2):
         self.n_agents = n_agents
+        self.model_name = f"{n_agents * 2}x{n_agents}"
 
         # Main model
         self.model = self.create_model()
@@ -79,7 +75,7 @@ class DQL:
         self.replay_memory = deque(maxlen=REPLAY_MEMORY_SIZE)
 
         # Custom tensorboard object
-        self.tensorboard = ModifiedTensorBoard(log_dir="logs/{}-{}".format(MODEL_NAME, int(time.time())))
+        self.tensorboard = ModifiedTensorBoard(log_dir="logs/{}-{}".format(self.model_name, int(time.time())))
 
         # Used to count when to update target network with main network's weights
         self.target_update_counter = 0
@@ -87,13 +83,15 @@ class DQL:
 
     def create_model(self, input_dim, output_dim):
 
-        input_dim = self.n_agents * len(state_inputs)   # should be 4 in the scenario with 2 cars
+        input_dim = self.n_agents * len(state_inputs)   # should be 4 in the scenario with 2 cars and v and p for each car
         output_dim = self.n_agents * ACTION_SPACE_SIZE  # 20 possible actions per car
 
         model = Sequential()
         model.add(Flatten())   # this converts input to 1D feature vectors
+        model.add(Dense(units=128, input_dim=input_dim, activation='relu'))
         model.add(Dense(units=128, activation='relu'))
         model.add(Dense(units=64, activation='relu'))
+        model.add(Dense(units=32, activation='relu'))
         model.add(Dense(output_dim), activation='linear')
 
         model.compile(loss="mse", optimizer=Adam(lr=0.001), metrics=['accuracy'])
