@@ -465,6 +465,7 @@ class MyCallback(BaseCallback):
         filename = 'results-' + time.strftime("%Y%m%d") + '.txt'
         results = f"{self.episode_reward}, {self.episode_total_time / self.num_steps}, {self.episode_collision}\n"
 
+        # Write to file
         with open(filename, "a") as f:
             f.write(results)
         
