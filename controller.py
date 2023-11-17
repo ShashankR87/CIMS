@@ -44,7 +44,7 @@ MIN_REWARD = -200  # For model save
 
 COLLISION_PENALTY = 10_000
 DESTINATION_REWARD = 1000
-DID_NOT_REACH_PENALTY = 100
+DID_NOT_REACH_PENALTY = 1000
 N_CARS = 4
 VEHICLE_MODEL = 'vehicle.jeep.wrangler_rubicon'
 T = 20
@@ -91,6 +91,7 @@ class CarlaEnv:
         self.vehicles = []
         self.collision = False
         self.sim_time = 0
+        self.reward = 0
         # self.action_space = Box(low=0.0, high=10.0, shape=(N_CARS,), dtype=np.int32)
 
         # self.action_space = spaces.Discrete(10)
@@ -102,7 +103,7 @@ class CarlaEnv:
         self.observation_space = spaces.Box(low=np.array(([0] * (len(TRAJECTORIES)) + [V_MIN]) * N_CARS), high=np.array(([1] * (len(TRAJECTORIES)) + [V_MAX]) * N_CARS), dtype=np.int32)
         # self.observation_space = MultiDiscrete([len(TRAJECTORIES), V_MAX - V_MIN+1] * N_CARS)
 
-        self.spectator_setup(x=-47, y=16.8, z=60)
+        self.spectator_setup(x=-47, y=16.8, z=100)
         # settings = world.get_settings()
         # settings.synchronous_mode = True # Enables synchronous mode
         # # settings.fixed_delta_seconds = 0.05
@@ -125,7 +126,8 @@ class CarlaEnv:
         transform = carla.Transform(spectatorLoc, carla.Rotation(-90)) 
         spectator.set_transform(transform)
 
-
+    def get_reward(self):
+        return self.reward
     def get_spawn_points(self, show=False):
         # get spawn points and label them on the map
         spawn_points = self.world.get_map().get_spawn_points()
@@ -240,6 +242,7 @@ class CarlaEnv:
         for location in path:
             
             self.orient_vehicle_towards_target(vehicle, location)
+            current_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
             if cnt > 1:
                 vehicle.apply_control(carla.VehicleControl(throttle = throttle, brake=brake))
                 print(f'Throttle applied for car coming from {vehicle_data["path_idx"]} with value {throttle}')
@@ -252,23 +255,32 @@ class CarlaEnv:
             cnt += 1
             speed = math.sqrt(vehicle_data["carla_car"].get_velocity().x**2 + vehicle_data["carla_car"].get_velocity().y**2 + vehicle_data["carla_car"].get_velocity().z**2)
             
+            while True:
+                new_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
+                if abs(new_angle - current_angle) >= 90:
+                    print(f'Passed waypoint, angle change is {abs(new_angle - current_angle)}')
+                    break
+                if (datetime.now() - start_time).total_seconds() > 20:
+                    print('Took too long ', str((datetime.now() - start_time).total_seconds()))
+                    self.destroy_actor(vehicle_data)
+                    return
             
-            if speed <= 0:
-                time_to_sleep = 20
-            else:
+            # if speed <= 0:
+            #     time_to_sleep = 20
+            # else:
                 
-                time_to_sleep = self.calculate_time_with_acceleration(acceleration, speed, direction.length())
-                if time_to_sleep < 0:
-                    time_to_sleep = 21
-                else:
-                    time_to_sleep = np.clip(time_to_sleep, 0, 20)
-            print(f'Car from {vehicle_data["path_idx"]} sleeping for {time_to_sleep} sec. It is convering a distance of {direction.length()} with a speed of {speed} and {vehicle_data["carla_car"].get_velocity().length()}')
+            #     time_to_sleep = self.calculate_time_with_acceleration(acceleration, speed, direction.length())
+            #     if time_to_sleep < 0:
+            #         time_to_sleep = 21
+            #     else:
+            #         time_to_sleep = np.clip(time_to_sleep, 0, 20)
+            # print(f'Car from {vehicle_data["path_idx"]} sleeping for {time_to_sleep} sec. It is convering a distance of {direction.length()} with a speed of {speed} and {vehicle_data["carla_car"].get_velocity().length()}')
             
-            time.sleep(time_to_sleep)
-            if (datetime.now() - start_time).total_seconds() > 20:
-                print('Took too long ', str((datetime.now() - start_time).total_seconds() ))
-                self.destroy_actor(vehicle_data)
-                return
+            # time.sleep(time_to_sleep)
+            # if (datetime.now() - start_time).total_seconds() > 20:
+            #     print('Took too long ', str((datetime.now() - start_time).total_seconds() ))
+            #     self.destroy_actor(vehicle_data)
+            #     return
         print(f'Car from {vehicle_data["path_idx"]} has reached destination.')
         self.destroy_actor(vehicle_data)
         self.vehicles[car_idx]["total_time"] = (datetime.now() - start_time).total_seconds()
@@ -353,6 +365,7 @@ class CarlaEnv:
             state.append(v["velocity"])
         print('Actions taken', str(acc_list))
         print('Reward: ', str(reward))
+        self.reward = reward
         return np.array(state), reward, True, {}
 
 
@@ -418,15 +431,19 @@ class CustomWrapper(gym.Env):
         return self.env.step(action)
     def destroy(self):
         self.env.destroy_all_actors()
+    def get_reward(self):
+        return self.env.get_reward()
 
 class MyCallback(BaseCallback):
     def __init__(self, verbose=0):
         super(MyCallback, self).__init__(verbose)
         self.episode_reward = 0
+        
 
     def _on_step(self):
+        self.episode_reward += self.training_env.env_method(method_name='get_reward')[0]
         return True
-    def _on_episode_end(self) -> None:
+    def _on_rollout_end(self) -> None:
         # This method will be called at the end of each episode
         print(f"Num timesteps: {self.num_timesteps}, episode reward: {self.episode_reward}")
         self.episode_reward = 0  # Reset episode reward for the next episode
@@ -469,7 +486,7 @@ def main():
     model = PPO("MlpPolicy", wrapped_env, verbose=1, policy_kwargs=dict(net_arch=[64,64]), n_steps=2)
     model.set_logger(logger)
     print("model training.")
-    model.learn(total_timesteps=2, progress_bar=True, callback = callback)
+    model.learn(total_timesteps=6, progress_bar=True, callback = callback)
 
     model.save("cims_model")
 
