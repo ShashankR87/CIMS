@@ -126,8 +126,12 @@ class CarlaEnv:
         transform = carla.Transform(spectatorLoc, carla.Rotation(-90)) 
         spectator.set_transform(transform)
 
-    def get_reward(self):
-        return self.reward
+    def get_env_data(self):
+        total_times = [car["total_time"] for car in self.vehicles]
+        avg_total_time = sum(total_times) / len(total_times)
+
+        return self.reward, self.collision, avg_total_time
+
     def get_spawn_points(self, show=False):
         # get spawn points and label them on the map
         spawn_points = self.world.get_map().get_spawn_points()
@@ -438,15 +442,37 @@ class MyCallback(BaseCallback):
     def __init__(self, verbose=0):
         super(MyCallback, self).__init__(verbose)
         self.episode_reward = 0
-        
+        self.episode_collision = False
+        self.episode_total_time = 0
+        self.num_steps = 0
+
 
     def _on_step(self):
-        self.episode_reward += self.training_env.env_method(method_name='get_reward')[0]
+        reward, collision, total_time = self.training_env.env_method(method_name='get_env_data')[0]
+        self.episode_reward += reward
+        self.episode_collision |= collision
+        self.episode_total_time += total_time
+
         return True
+    
     def _on_rollout_end(self) -> None:
         # This method will be called at the end of each episode
-        print(f"Num timesteps: {self.num_timesteps}, episode reward: {self.episode_reward}")
+        print(f"Num timesteps: {self.num_timesteps}, 
+              episode reward: {self.episode_reward}, 
+              average total time: {self.episode_total_time / self.num_steps}, 
+              collision: {self.episode_collision}")
+        
+        filename = 'results-' + time.strftime("%Y%m%d") + '.txt'
+        results = f"{self.episode_reward}, {self.episode_total_time / self.num_steps}, {self.episode_collision}\n"
+
+        with open(filename, "a") as f:
+            f.write(results)
+        
         self.episode_reward = 0  # Reset episode reward for the next episode
+        self.episode_total_time = 0
+        self.num_steps = 0
+        self.episode_collision = False
+
 
 def main():
 
