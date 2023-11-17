@@ -27,6 +27,7 @@ from gym.spaces import Box, MultiDiscrete
 from gym import spaces
 from gym.envs.registration import register
 import cmath
+import argparse
 
 # Environment settings
 EPISODES = 20_000
@@ -45,15 +46,15 @@ MIN_REWARD = -200  # For model save
 COLLISION_PENALTY = 10_000
 DESTINATION_REWARD = 1000
 DID_NOT_REACH_PENALTY = 1000
-N_CARS = 4
+N_CARS = 3
 VEHICLE_MODEL = 'vehicle.jeep.wrangler_rubicon'
 T = 20
 
-ACC_MAP = {i: i - 10 for i in range(20)}   # {0: -10, 1: -9, ... 18: 8, 19: 9}
+ACC_MAP = {i: i for i in range(10)}   # {0: -10, 1: -9, ... 18: 8, 19: 9}
 ACTION_SPACE_SIZE = len(ACC_MAP)           # 20
 V_MIN = 15
 V_MAX = 30
-
+MAX_ALIVE_TIME = 10
 
 TRAJECTORIES = [                                            
     (139, [390, 298, 431, 429, 508, 435, 495, 343, 351]),
@@ -85,17 +86,18 @@ class CarlaEnv:
 
         self.client = carla.Client('localhost', 2000) 
         self.world = self.client.get_world()
-        self.bp_lib = self.world.get_blueprint_library() 
+        self.bp_lib = self.world.get_blueprint_library()
         self.spawn_points = self.get_spawn_points()
         self.waypoints = self.world.get_map().generate_waypoints(10)
         self.vehicles = []
         self.collision = False
         self.sim_time = 0
         self.reward = 0
+        self.total_times = []
         # self.action_space = Box(low=0.0, high=10.0, shape=(N_CARS,), dtype=np.int32)
 
         # self.action_space = spaces.Discrete(10)
-        self.action_space = spaces.MultiDiscrete([20] * N_CARS)
+        self.action_space = spaces.MultiDiscrete([len(ACC_MAP)] * N_CARS)
 
 
         # Combine the components using Tuple space
@@ -127,11 +129,13 @@ class CarlaEnv:
         spectator.set_transform(transform)
 
     def get_env_data(self):
-        total_times = [car["total_time"] for car in self.vehicles]
+        if len(self.total_times) > 0:
+            total_times = self.total_times
+        else:
+            total_times = [car["total_time"] for car in self.vehicles]
         avg_total_time = sum(total_times) / len(total_times)
 
         return self.reward, self.collision, avg_total_time
-
     def get_spawn_points(self, show=False):
         # get spawn points and label them on the map
         spawn_points = self.world.get_map().get_spawn_points()
@@ -142,7 +146,13 @@ class CarlaEnv:
 
 
     def spawn_vehicle(self, spawn_point):
+
         vehicle_bp = self.bp_lib.find(VEHICLE_MODEL)
+        
+        car_color = list(np.random.choice(range(256), size=3))
+        car_color = [str(c) for c in car_color]
+        car_color = ','.join(car_color)
+        vehicle_bp.set_attribute('color', car_color)
         vehicle = self.world.spawn_actor(vehicle_bp, self.spawn_points[spawn_point])
         # TODO: Attach collision detector and add callback function that sets self.collision to True
         return vehicle
@@ -165,7 +175,6 @@ class CarlaEnv:
             while direction in chosen_directions:
                 direction = random.randint(0, 3)
             chosen_directions.append(direction)
-            print(direction)
             trajectory = random.choice(TRAJECTORIES[direction*3: direction*3 +3])
             path = self.create_path(trajectory[1])
 
@@ -249,7 +258,6 @@ class CarlaEnv:
             current_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
             if cnt > 1:
                 vehicle.apply_control(carla.VehicleControl(throttle = throttle, brake=brake))
-                print(f'Throttle applied for car coming from {vehicle_data["path_idx"]} with value {throttle}')
             else:
                 direction = location - vehicle.get_location()
                 target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
@@ -262,30 +270,11 @@ class CarlaEnv:
             while True:
                 new_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
                 if abs(new_angle - current_angle) >= 90:
-                    print(f'Passed waypoint, angle change is {abs(new_angle - current_angle)}')
                     break
-                if (datetime.now() - start_time).total_seconds() > 20:
-                    print('Took too long ', str((datetime.now() - start_time).total_seconds()))
+                if (datetime.now() - start_time).total_seconds() > MAX_ALIVE_TIME:
                     self.destroy_actor(vehicle_data)
                     return
-            
-            # if speed <= 0:
-            #     time_to_sleep = 20
-            # else:
-                
-            #     time_to_sleep = self.calculate_time_with_acceleration(acceleration, speed, direction.length())
-            #     if time_to_sleep < 0:
-            #         time_to_sleep = 21
-            #     else:
-            #         time_to_sleep = np.clip(time_to_sleep, 0, 20)
-            # print(f'Car from {vehicle_data["path_idx"]} sleeping for {time_to_sleep} sec. It is convering a distance of {direction.length()} with a speed of {speed} and {vehicle_data["carla_car"].get_velocity().length()}')
-            
-            # time.sleep(time_to_sleep)
-            # if (datetime.now() - start_time).total_seconds() > 20:
-            #     print('Took too long ', str((datetime.now() - start_time).total_seconds() ))
-            #     self.destroy_actor(vehicle_data)
-            #     return
-        print(f'Car from {vehicle_data["path_idx"]} has reached destination.')
+        
         self.destroy_actor(vehicle_data)
         self.vehicles[car_idx]["total_time"] = (datetime.now() - start_time).total_seconds()
 
@@ -306,7 +295,7 @@ class CarlaEnv:
                 brake = np.clip(-accelerations[i] / 20, 0, 1)
 
             
-            print(f'Acc for car {i} is {accelerations[i]} and the throttle is {throttle} and brake is {brake}')
+            # print(f'Acc for car {i} is {accelerations[i]} and the throttle is {throttle} and brake is {brake}')
             thread_list.append(threading.Thread(target=self.follow_path_with_velocity, args=(car_dict, i , float(throttle), float(brake), accelerations[i])))
         
         for t in thread_list:
@@ -334,6 +323,8 @@ class CarlaEnv:
         return onehot
 
     def reset(self):
+        total_times = [car["total_time"] for car in self.vehicles]
+        self.total_times  = total_times
         self.destroy_all_actors()
         self.vehicles = []
         self.spawn_n_cars()
@@ -344,7 +335,6 @@ class CarlaEnv:
         for v in self.vehicles:
             state.extend(self.convert_to_onehot(v["path_idx"]))
             state.append(v["velocity"])
-        print(state)
         return np.array(state)
 
     def step(self, acc_list):
@@ -367,60 +357,10 @@ class CarlaEnv:
         for v in self.vehicles:
             state.extend(self.convert_to_onehot(v["path_idx"]))
             state.append(v["velocity"])
-        print('Actions taken', str(acc_list))
-        print('Reward: ', str(reward))
+        
+        print('Reward for episode: ', str(reward))
         self.reward = reward
         return np.array(state), reward, True, {}
-
-
-
-    # def run_episodes(self, agent):
-        
-    #     rewards = [0]
-            
-    #     for episode in tqdm(range(1, EPISODES + 1), ascii=True, unit='episodes'):
-
-    #         agent.tensorboard.step = episode
-    #         episode_reward = 0
-
-    #         # Reset environment and get initial state 
-    #         state = self.reset()
-
-    #         # Choose an action 
-    #         if np.random.random() > epsilon:
-    #             # Get action from Q table - each action value should be an integer from 0 to 19
-    #             action1 = np.argmax(agent.get_qs(state)[:ACTION_SPACE_SIZE])
-    #             action2 = np.argmax(agent.get_qs(state)[ACTION_SPACE_SIZE:])
-    #             action = [action1, action2]
-    #         else:
-    #             # Get random action
-    #             action = [np.random.randint(0, self.ACTION_SPACE_SIZE),
-    #                         np.random.randint(0, self.ACTION_SPACE_SIZE)]
-
-    #         reward = self.step(action)
-
-    #         # if SHOW_PREVIEW and not episode % AGGREGATE_STATS_EVERY:
-    #         #     env.render()
-
-    #         # Every step we update replay memory and train main network
-    #         agent.update_replay_memory((state, action, reward))
-    #         agent.train()
-
-    #         # Append episode reward to a list and log stats (every given number of episodes)
-    #         rewards.append(reward)
-    #         average_reward = sum(rewards[-AGGREGATE_STATS_EVERY:])/len(rewards[-AGGREGATE_STATS_EVERY:])
-    #         min_reward = min(rewards[-AGGREGATE_STATS_EVERY:])
-    #         max_reward = max(rewards[-AGGREGATE_STATS_EVERY:])
-    #         agent.tensorboard.update_stats(reward_avg=average_reward, reward_min=min_reward, reward_max=max_reward, epsilon=epsilon)
-
-    #         # Save model, but only when min reward is greater or equal a set value
-    #         if min_reward >= MIN_REWARD:
-    #             agent.model.save(f'models/{agent.model_name}__{max_reward:_>7.2f}max_{average_reward:_>7.2f}avg_{min_reward:_>7.2f}min__{int(time.time())}.model')
-
-    #         # Decay epsilon
-    #         if epsilon > MIN_EPSILON:
-    #             epsilon *= EPSILON_DECAY
-    #             epsilon = max(MIN_EPSILON, epsilon)
 
 class CustomWrapper(gym.Env):
     def __init__(self, your_custom_env):
@@ -435,64 +375,77 @@ class CustomWrapper(gym.Env):
         return self.env.step(action)
     def destroy(self):
         self.env.destroy_all_actors()
-    def get_reward(self):
-        return self.env.get_reward()
+    def get_env_data(self):
+        return self.env.get_env_data()
 
 class MyCallback(BaseCallback):
     def __init__(self, verbose=0):
+
         super(MyCallback, self).__init__(verbose)
-        self.episode_reward = 0
-        self.episode_collision = False
+
+        self.reward_per_episode = 0
+        self.episode_collision = 0
         self.episode_total_time = 0
         self.num_steps = 0
 
 
     def _on_step(self):
         reward, collision, total_time = self.training_env.env_method(method_name='get_env_data')[0]
-        self.episode_reward += reward
-        self.episode_collision |= collision
+        
+        self.reward_per_episode += reward
+        
+        self.episode_collision += 1 if reward == -COLLISION_PENALTY else 0
         self.episode_total_time += total_time
+        self.num_steps += 1
 
         return True
     
     def _on_rollout_end(self) -> None:
         # This method will be called at the end of each episode
-        print(f"Num timesteps: {self.num_timesteps}, 
-              episode reward: {self.episode_reward}, 
-              average total time: {self.episode_total_time / self.num_steps}, 
+        print(f"Num timesteps: {self.num_timesteps}, \
+            episode reward: {self.reward_per_episode}, \
+              average total time: {self.episode_total_time / self.num_steps}, \
               collision: {self.episode_collision}")
         
-        filename = 'results-' + time.strftime("%Y%m%d") + '.txt'
-        results = f"{self.episode_reward}, {self.episode_total_time / self.num_steps}, {self.episode_collision}\n"
+        filename = 'results-' + time.strftime("%Y%m%d%H%M%S") + '.txt'
+        results = f"{self.reward_per_episode}, {self.episode_total_time / self.num_steps}, {self.episode_collision}\n"
 
         # Write to file
         with open(filename, "a") as f:
             f.write(results)
         
-        self.episode_reward = 0  # Reset episode reward for the next episode
+        self.reward_per_episode = 0  # Reset episode reward for the next episode
         self.episode_total_time = 0
         self.num_steps = 0
-        self.episode_collision = False
-
+        self.episode_collision = 0
 
 def main():
+
+    argparser = argparse.ArgumentParser()
+    
+    argparser.add_argument(
+        '--saved',
+        metavar='s',
+        default='None',
+        help='Filename/path to a saved model file',
+        nargs='?')
+    
+    argparser.add_argument(
+        '--train',
+        metavar='t',
+        default='True',
+        help='Trains the model before inference', 
+        nargs='?')
+
+    args = argparser.parse_args()
+
 
     print("Execution started")
     n_steps = 20
     total_train_time = 600
     n_episodes = total_train_time // 20
     total_timesteps = n_steps * n_episodes
-    # carla setup
-    # carla_env = CarlaEnv()
-
-    # fix spectator on top of intersection
-    # carla_env.spectator_setup(x=-47, y=16.8, z=60)
-
-    # agent = DQL()
-
-    # random.seed(1)
-    # np.random.seed(1)
-    # tf.set_random_seed(1)
+    
 
     if not os.path.isdir('models'):
         os.makedirs('models')
@@ -512,10 +465,15 @@ def main():
 
     model = PPO("MlpPolicy", wrapped_env, verbose=1, policy_kwargs=dict(net_arch=[64,64]), n_steps=2)
     model.set_logger(logger)
-    print("model training.")
-    model.learn(total_timesteps=6, progress_bar=True, callback = callback)
 
-    model.save("cims_model")
+    if args.saved != 'None':
+        model.load(args.saved)
+    if args.train == 'True':
+        model.learn(total_timesteps=6, progress_bar=True, callback = callback)
+
+    current_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    model.save(f"models/cims_model_-{current_timestamp}")
+    wrapped_env.destroy()
 
 
 
