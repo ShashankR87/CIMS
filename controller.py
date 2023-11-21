@@ -1,19 +1,17 @@
 from datetime import datetime
 import carla 
+import wandb
 import glob
 import os
-import random 
 import sys
 import time
 import numpy as np
 import numpy as np
 # import tensorflow as tf
-from collections import deque
 import time
 import random
 from tqdm import tqdm
 import os
-from PIL import Image
 # import cv2
 import threading
 import math
@@ -417,6 +415,17 @@ class MyCallback(BaseCallback):
         # # Write to file
         # with open(filename, "a") as f:
         #     f.write(results)
+
+        # log metrics to wandb
+        wandb.log({"reward_per_episode": self.reward_per_episode, 
+                   "total_time": self.episode_total_time / self.num_steps,
+                   "episode_collision": self.episode_collision})
+
+
+        # Write to file
+        # with open(filename, "a") as f:
+        #     f.write(results)
+        
         
         self.reward_per_episode = 0  # Reset episode reward for the next episode
         self.episode_total_time = 0
@@ -444,12 +453,24 @@ def main():
     args = argparser.parse_args()
 
 
-    print("Execution started")
     n_steps = 20
     total_train_time = 600
     n_episodes = total_train_time // 20
     total_timesteps = n_steps * n_episodes
     
+    # start a new wandb run to track this script
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="cims",
+        
+        # track hyperparameters and run metadata
+        config={
+        "n_steps": n_steps,
+        "n_episodes": n_episodes,
+        "total_train_time": total_train_time
+        }
+    )
+    print("Execution started")
 
     if not os.path.isdir('models'):
         os.makedirs('models')
@@ -482,6 +503,9 @@ def main():
 
     
     wrapped_env.destroy()
+    
+    wandb.finish()
+
 
 
 
