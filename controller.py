@@ -31,7 +31,7 @@ import argparse
 
 # Environment settings
 EPISODES = 20_000
-
+FIXED_TIME_STEP = 0.05
 # Exploration settings
 epsilon = 1  # not a constant, going to be decayed
 EPSILON_DECAY = 0.99975
@@ -54,7 +54,7 @@ ACC_MAP = {i: i for i in range(10)}   # {0: -10, 1: -9, ... 18: 8, 19: 9}
 ACTION_SPACE_SIZE = len(ACC_MAP)           # 20
 V_MIN = 15
 V_MAX = 30
-MAX_ALIVE_TIME = 10
+MAX_ALIVE_TIME = 100
 
 TRAJECTORIES = [                                            
     (139, [390, 298, 431, 429, 508, 435, 495, 343, 351]),
@@ -103,6 +103,9 @@ class CarlaEnv:
         # Combine the components using Tuple space
         #([1,2,3]) * 5
         self.observation_space = spaces.Box(low=np.array(([0] * (len(TRAJECTORIES)) + [V_MIN]) * N_CARS), high=np.array(([1] * (len(TRAJECTORIES)) + [V_MAX]) * N_CARS), dtype=np.int32)
+        settings = self.world.get_settings()
+        settings.fixed_delta_seconds = FIXED_TIME_STEP
+        self.world.apply_settings(settings)
         # self.observation_space = MultiDiscrete([len(TRAJECTORIES), V_MAX - V_MIN+1] * N_CARS)
 
         self.spectator_setup(x=-47, y=16.8, z=100)
@@ -271,7 +274,7 @@ class CarlaEnv:
                 new_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
                 if abs(new_angle - current_angle) >= 90:
                     break
-                if (datetime.now() - start_time).total_seconds() > MAX_ALIVE_TIME:
+                if (datetime.now() - start_time).total_seconds() > MAX_ALIVE_TIME * FIXED_TIME_STEP:
                     self.destroy_actor(vehicle_data)
                     return
         
@@ -346,6 +349,7 @@ class CarlaEnv:
         if self.collision:
             reward = -COLLISION_PENALTY
 
+
         else:
             # the reward for completion is inversely proportional to the total time it took to traverse the intersection
             reached_destination = [car for car in self.vehicles if car["total_time"]>0]
@@ -407,12 +411,12 @@ class MyCallback(BaseCallback):
               average total time: {self.episode_total_time / self.num_steps}, \
               collision: {self.episode_collision}")
         
-        filename = 'results-' + time.strftime("%Y%m%d%H%M%S") + '.txt'
-        results = f"{self.reward_per_episode}, {self.episode_total_time / self.num_steps}, {self.episode_collision}\n"
+        # filename = 'results-' + time.strftime("%Y%m%d%H%M%S") + '.txt'
+        # results = f"{self.reward_per_episode}, {self.episode_total_time / self.num_steps}, {self.episode_collision}\n"
 
-        # Write to file
-        with open(filename, "a") as f:
-            f.write(results)
+        # # Write to file
+        # with open(filename, "a") as f:
+        #     f.write(results)
         
         self.reward_per_episode = 0  # Reset episode reward for the next episode
         self.episode_total_time = 0
@@ -449,6 +453,8 @@ def main():
 
     if not os.path.isdir('models'):
         os.makedirs('models')
+    if not os.path.isdir('logs'):
+        os.makedirs('logs')
 
     # carla_env.run_episodes(agent)
     # custom_env_wrapped = gym.wrappers.TimeLimit(carla_env, max_episode_steps=1000)
@@ -460,19 +466,21 @@ def main():
     )
     wrapped_env = gym.make('CustomWrapped-v0')
     callback = MyCallback()
-    logger = configure("/logs/", ["stdout", "csv", "tensorboard"])
+    # logger = configure("/logs/", ["stdout", "csv", "tensorboard"])
 
 
-    model = PPO("MlpPolicy", wrapped_env, verbose=1, policy_kwargs=dict(net_arch=[64,64]), n_steps=2)
-    model.set_logger(logger)
+    model = PPO("MlpPolicy", wrapped_env, verbose=1, policy_kwargs=dict(net_arch=[64,64]), n_steps=2, tensorboard_log="logs")
+    # model.set_logger(logger)
 
     if args.saved != 'None':
         model.load(args.saved)
     if args.train == 'True':
-        model.learn(total_timesteps=6, progress_bar=True, callback = callback)
+        for i in range(1):
+            model.learn(total_timesteps=10, progress_bar=True, callback = callback, tb_log_name="PPO_ns128", reset_num_timesteps= False)
+            current_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            model.save(f"models/cims_model_{i}_{current_timestamp}")
 
-    current_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    model.save(f"models/cims_model_-{current_timestamp}")
+    
     wrapped_env.destroy()
 
 
