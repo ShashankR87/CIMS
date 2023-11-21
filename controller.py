@@ -29,7 +29,7 @@ import argparse
 
 # Environment settings
 EPISODES = 20_000
-FIXED_TIME_STEP = 0.05
+FIXED_TIME_STEP = 0.2
 # Exploration settings
 epsilon = 1  # not a constant, going to be decayed
 EPSILON_DECAY = 0.99975
@@ -72,7 +72,7 @@ TRAJECTORIES = [
 
 class CarlaEnv:
 
-    def __init__(self):
+    def __init__(self, synchronous_mode=False):
         try:
             sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
             sys.version_info.major,
@@ -101,16 +101,16 @@ class CarlaEnv:
         # Combine the components using Tuple space
         #([1,2,3]) * 5
         self.observation_space = spaces.Box(low=np.array(([0] * (len(TRAJECTORIES)) + [V_MIN]) * N_CARS), high=np.array(([1] * (len(TRAJECTORIES)) + [V_MAX]) * N_CARS), dtype=np.int32)
+        self.spectator_setup(x=-47, y=16.8, z=100)
+
         settings = self.world.get_settings()
-        settings.fixed_delta_seconds = FIXED_TIME_STEP
-        self.world.apply_settings(settings)
         # self.observation_space = MultiDiscrete([len(TRAJECTORIES), V_MAX - V_MIN+1] * N_CARS)
 
-        self.spectator_setup(x=-47, y=16.8, z=100)
-        # settings = world.get_settings()
-        # settings.synchronous_mode = True # Enables synchronous mode
-        # # settings.fixed_delta_seconds = 0.05
-        # world.apply_settings(settings)
+        if synchronous_mode:
+            settings.synchronous_mode = True # Enables synchronous mode
+
+        settings.fixed_delta_seconds = FIXED_TIME_STEP
+        self.world.apply_settings(settings)
 
     def __getstate__(self):
         # Return None to exclude the client object from pickling
@@ -245,39 +245,89 @@ class CarlaEnv:
             return t2
         return t1
 
-        
+    def pure_pursuit(vehicle_transform, lookahead_distance, waypoints):
+        '''Returns steering angle based on next waypoint'''
 
-    def follow_path_with_velocity(self, vehicle_data, car_idx, throttle, brake, acceleration):
-        cnt = 0
-        vehicle = vehicle_data["carla_car"]
-        path = vehicle_data["path"]
-        velocity = vehicle_data["velocity"]
+        vehicle_location = vehicle_transform.location
+        vehicle_rotation = vehicle_transform.rotation
+
+        closest_waypoint = min(waypoints, key=lambda w: w.distance(vehicle_location))
+        target_index = waypoints.index(closest_waypoint)
+
+
+        while target_index < len(waypoints) - 1:
+            if vehicle_location.distance(waypoints[target_index + 1]) > lookahead_distance:
+                break
+            target_index += 1
+        target_waypoint = waypoints[target_index]
+
+        alpha = math.atan2(target_waypoint.y - vehicle_location.y, target_waypoint.x - vehicle_location.x) - math.radians(vehicle_rotation.yaw)
+        L = vehicle_location.distance(target_waypoint)
+        steering_angle = math.atan2(2.0 * 5.5 * math.sin(alpha) / L, 1.0)
+
+        done = True if target_index == len(waypoints) - 1 else False
+
+        return math.degrees(steering_angle), done
+
+    
+    def follow_path_with_velocity_pure_pursuit(self, throttles):
         start_time = datetime.now()
-        for location in path:
-            
-            self.orient_vehicle_towards_target(vehicle, location)
-            current_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
-            if cnt > 1:
-                vehicle.apply_control(carla.VehicleControl(throttle = throttle, brake=brake))
-            else:
-                direction = location - vehicle.get_location()
-                target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
-                target_direction_radians = math.radians(target_direction_degrees)
-                target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
-                vehicle.set_target_velocity(target_velocity_vector)
-            cnt += 1
-            speed = math.sqrt(vehicle_data["carla_car"].get_velocity().x**2 + vehicle_data["carla_car"].get_velocity().y**2 + vehicle_data["carla_car"].get_velocity().z**2)
-            
-            while True:
-                new_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
-                if abs(new_angle - current_angle) >= 90:
-                    break
+
+        for _ in range(1000):
+            for i, vehicle_data in enumerate(self.vehicles):
+                vehicle = vehicle_data["carla_car"]  
+                if not vehicle.is_alive:  
+                    continue          
+                vehicle_transform = vehicle.get_transform()
+                steering_angle, done = self.pure_pursuit(vehicle_transform, lookahead_distance=3.0, waypoints=vehicle_data["path"])
+
                 if (datetime.now() - start_time).total_seconds() > MAX_ALIVE_TIME * FIXED_TIME_STEP:
                     self.destroy_actor(vehicle_data)
-                    return
+                    continue
+            
+                control = carla.VehicleControl(throttle=throttles[i], steer=steering_angle)
+                vehicle.apply_control(control)
+
+                if done:
+                    self.destroy_actor(vehicle_data)
+                    self.vehicles[i]["total_time"] = (datetime.now() - start_time).total_seconds()
+                    continue
+                
+        self.world.tick()
+
+
+    # def follow_path_with_velocity(self, vehicle_data, car_idx, throttle, brake, acceleration):
+    #     cnt = 0
+    #     vehicle = vehicle_data["carla_car"]
+    #     path = vehicle_data["path"]
+    #     velocity = vehicle_data["velocity"]
+    #     start_time = datetime.now()
+    #     for location in path:
+            
+    #         self.orient_vehicle_towards_target(vehicle, location)
+    #         current_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
+    #         if cnt > 1:
+    #             vehicle.apply_control(carla.VehicleControl(throttle = throttle, brake=brake))
+    #         else:
+    #             direction = location - vehicle.get_location()
+    #             target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
+    #             target_direction_radians = math.radians(target_direction_degrees)
+    #             target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
+    #             vehicle.set_target_velocity(target_velocity_vector)
+    #         cnt += 1
+    #         speed = math.sqrt(vehicle_data["carla_car"].get_velocity().x**2 + vehicle_data["carla_car"].get_velocity().y**2 + vehicle_data["carla_car"].get_velocity().z**2)
+            
+    #         while True:
+    #             new_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
+    #             if abs(new_angle - current_angle) >= 90:
+    #                 break
+    #             if (datetime.now() - start_time).total_seconds() > MAX_ALIVE_TIME * FIXED_TIME_STEP:
+    #                 self.destroy_actor(vehicle_data)
+    #                 return
         
-        self.destroy_actor(vehicle_data)
-        self.vehicles[car_idx]["total_time"] = (datetime.now() - start_time).total_seconds()
+    #     self.destroy_actor(vehicle_data)
+    #     self.vehicles[car_idx]["total_time"] = (datetime.now() - start_time).total_seconds()
+
 
     def action(self, acc_list):
         '''The car can take any of the ACTION_SPACE_SIZE possible throttle values from A_MIN to A_MAX'''
@@ -285,25 +335,27 @@ class CarlaEnv:
         # TODO: This is when we run the entire simulation by applying respective accelerations 
         # and update self.collisions and car["total_time"] for each car
 
-        thread_list = []
-        accelerations = [ACC_MAP[a] for a in acc_list]
-        for i, car_dict in enumerate(self.vehicles):
-            if accelerations[i] > 0:
-                throttle = np.clip(accelerations[i] / 10, 0, 1)
-                brake = 0
-            else:
-                throttle = 0
-                brake = np.clip(-accelerations[i] / 20, 0, 1)
+        # thread_list = []
+        # accelerations = [ACC_MAP[a] for a in acc_list]
+        # for i, car_dict in enumerate(self.vehicles):
+        #     if accelerations[i] > 0:
+        #         throttle = np.clip(accelerations[i] / 10, 0, 1)
+        #         brake = 0
+        #     else:
+        #         throttle = 0
+        #         brake = np.clip(-accelerations[i] / 20, 0, 1)
 
-            
             # print(f'Acc for car {i} is {accelerations[i]} and the throttle is {throttle} and brake is {brake}')
-            thread_list.append(threading.Thread(target=self.follow_path_with_velocity, args=(car_dict, i , float(throttle), float(brake), accelerations[i])))
+        #     thread_list.append(threading.Thread(target=self.follow_path_with_velocity, args=(car_dict, i , float(throttle), float(brake), accelerations[i])))
         
-        for t in thread_list:
-            t.start()
-        for t in thread_list:
-            t.join()
+        # for t in thread_list:
+        #     t.start()
+        # for t in thread_list:
+        #     t.join()
         # self.destroy_all_actors()
+
+        throttles = [np.clip(acceleration / 10, 0, 1) for acceleration in acc_list]
+        self.follow_path_with_velocity_pure_pursuit(throttles)
         
 
     def destroy_all_actors(self):
@@ -312,6 +364,7 @@ class CarlaEnv:
                 car["carla_car"].destroy()
             if car["collision_sensor"].is_alive:
                 car["collision_sensor"].destroy()
+
     def destroy_actor(self, car):
         if car["carla_car"].is_alive:
             car["carla_car"].destroy()
@@ -380,11 +433,10 @@ class CustomWrapper(gym.Env):
     def get_env_data(self):
         return self.env.get_env_data()
 
+
 class MyCallback(BaseCallback):
     def __init__(self, verbose=0):
-
         super(MyCallback, self).__init__(verbose)
-
         self.reward_per_episode = 0
         self.episode_collision = 0
         self.episode_total_time = 0
@@ -393,9 +445,7 @@ class MyCallback(BaseCallback):
 
     def _on_step(self):
         reward, collision, total_time = self.training_env.env_method(method_name='get_env_data')[0]
-        
         self.reward_per_episode += reward
-        
         self.episode_collision += 1 if reward == -COLLISION_PENALTY else 0
         self.episode_total_time += total_time
         self.num_steps += 1
@@ -412,20 +462,14 @@ class MyCallback(BaseCallback):
         # filename = 'results-' + time.strftime("%Y%m%d%H%M%S") + '.txt'
         # results = f"{self.reward_per_episode}, {self.episode_total_time / self.num_steps}, {self.episode_collision}\n"
 
-        # # Write to file
-        # with open(filename, "a") as f:
-        #     f.write(results)
-
         # log metrics to wandb
         wandb.log({"reward_per_episode": self.reward_per_episode, 
                    "total_time": self.episode_total_time / self.num_steps,
                    "episode_collision": self.episode_collision})
 
-
         # Write to file
         # with open(filename, "a") as f:
         #     f.write(results)
-        
         
         self.reward_per_episode = 0  # Reset episode reward for the next episode
         self.episode_total_time = 0
@@ -452,22 +496,18 @@ def main():
 
     args = argparser.parse_args()
 
-
     n_steps = 20
     total_train_time = 600
     n_episodes = total_train_time // 20
     total_timesteps = n_steps * n_episodes
+    synchronous_mode = True
     
-    # start a new wandb run to track this script
     wandb.init(
-        # set the wandb project where this run will be logged
         project="cims",
-        
-        # track hyperparameters and run metadata
         config={
-        "n_steps": n_steps,
-        "n_episodes": n_episodes,
-        "total_train_time": total_train_time
+            "n_steps": n_steps,
+            "n_episodes": n_episodes,
+            "total_train_time": total_train_time,
         }
     )
     print("Execution started")
@@ -481,9 +521,9 @@ def main():
     # custom_env_wrapped = gym.wrappers.TimeLimit(carla_env, max_episode_steps=1000)
     # env = make_vec_env(lambda: custom_env_wrapped, n_envs=1)
     register(
-    id='CustomWrapped-v0',
-    entry_point='__main__:CustomWrapper',
-    kwargs={'your_custom_env': CarlaEnv()},
+        id='CustomWrapped-v0',
+        entry_point='__main__:CustomWrapper',
+        kwargs={'your_custom_env': CarlaEnv(synchronous_mode=synchronous_mode)},
     )
     wrapped_env = gym.make('CustomWrapped-v0')
     callback = MyCallback()
@@ -503,10 +543,7 @@ def main():
 
     
     wrapped_env.destroy()
-    
     wandb.finish()
-
-
 
 
 if __name__ == "__main__":
