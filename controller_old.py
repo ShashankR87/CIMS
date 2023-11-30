@@ -28,6 +28,7 @@ from gym import spaces
 from gym.envs.registration import register
 import cmath
 import argparse
+import wandb
 
 # Environment settings
 EPISODES = 20_000
@@ -43,9 +44,9 @@ SHOW_PREVIEW = False
 MIN_REWARD = -200  # For model save
 
 
-COLLISION_PENALTY = 10_000
-DESTINATION_REWARD = 1000
-DID_NOT_REACH_PENALTY = 50
+COLLISION_PENALTY = 1_000
+DESTINATION_REWARD = 1_000
+DID_NOT_REACH_PENALTY = 10
 N_CARS = 3
 VEHICLE_MODEL = 'vehicle.jeep.wrangler_rubicon'
 T = 20
@@ -53,22 +54,33 @@ T = 20
 ACC_MAP = {i: i for i in range(10)}   # {0: -10, 1: -9, ... 18: 8, 19: 9}
 ACTION_SPACE_SIZE = len(ACC_MAP)           # 20
 V_MIN = 15.0
-V_MAX = 30.0
+V_MAX = 20.0
 MAX_ALIVE_TIME = 100
 
+# TRAJECTORIES = [                                            
+#     (139, [390, 302, 298, 431, 429, 508, 435, 495, 343, 351]),   #W->N
+#     (138, [389, 303, 299, 430, 426, 424, 666, 664]),             #W->E
+#     (138, [389, 303, 299, 501, 500, 327, 323, 315]),             #W->S
+#     (50, [353, 349, 345, 341, 487, 262, 336, 296, 300, 392]),    #N->W
+#     (50, [353, 349, 345, 341, 334, 327, 323, 315]),              #N->S
+#     (49, [352, 348, 344, 340, 436, 435, 492, 423, 665, 663]),    #N->E
+#     (28, [671, 673, 328, 472, 473, 338, 342 , 346, 350]),        #E->N
+#     (28, [671, 673, 328, 332, 336, 300, 392]),                   #E->W
+#     (29, [672, 674, 329, 289, 493, 508, 482, 318, 314]),         #E->S
+#     (85, [312, 316, 488, 490, 426, 424, 287, 666, 664]),         #S->E
+#     (85, [312, 316, 488, 492, 494, 342, 346, 350]),              #S->N
+#     (80, [313, 317, 489, 491, 427, 82, 512, 337, 301, 391])      #S->W
+# ]          
+
 TRAJECTORIES = [                                            
-    (139, [390, 298, 431, 429, 508, 435, 495, 343, 351]),   #W->N
-    (138, [389, 299, 664]),                                 #W->E
-    (138, [389, 299, 501, 500, 327, 323, 315]),             #W->S
-    (50, [353, 349, 345, 341, 487, 262, 336, 296, 300, 392]),              #N->W
-    (50, [353, 349, 345, 341, 334, 327, 323, 315]),                                  #N->S
-    (49, [352, 348, 344, 340, 436, 435, 492, 423, 665, 663]),              #N->E
-    (28, [671, 328, 472, 473, 338, 342 ,350]),              #E->N
-    (28, [671, 328, 392]),                                  #E->W
-    (29, [672, 329, 289, 493, 508, 482, 314]),              #E->S
-    (85, [312, 488, 490, 426, 424, 287, 664]),              #S->E
-    (85, [312, 488, 350]),                                  #S->N
-    (80, [313, 489, 491, 427, 82, 512, 337, 391])           #S->W
+    (139, [390, 302, 298, 431, 429, 508, 435, 495, 343, 351]),   #W->N
+    (138, [389, 303, 299, 430, 426, 424, 666, 664]),             #W->E             #W->S    #N->W
+    (50, [353, 349, 345, 341, 334, 327, 323, 315]),              #N->S
+    (49, [352, 348, 344, 340, 436, 435, 492, 423, 665, 663]),    #N->E        #E->N
+    (28, [671, 673, 328, 332, 336, 300, 392]),                   #E->W
+    (29, [672, 674, 329, 289, 493, 508, 482, 318, 314]),         #E->S         #S->E
+    (85, [312, 316, 488, 492, 494, 342, 346, 350]),              #S->N
+    (80, [313, 317, 489, 491, 427, 82, 512, 337, 301, 391])      #S->W
 ]                                                           #(spawn_point_index, [waypoint indicies])
 
 
@@ -98,10 +110,10 @@ class CarlaEnv:
         self.sim_time = 0
         self.reward = 0
         self.total_times = []
-        # self.action_space = Box(low=0.0, high=10.0, shape=(N_CARS,), dtype=np.int32)
+        self.action_space = Box(low=1.0, high=5.0, shape=(N_CARS,), dtype=np.int32)
 
         # self.action_space = spaces.Discrete(10)
-        self.action_space = spaces.MultiDiscrete([len(ACC_MAP)] * N_CARS)
+        # self.action_space = spaces.MultiDiscrete([len(ACC_MAP)] * N_CARS)
 
 
         # Combine the components using Tuple space
@@ -111,7 +123,18 @@ class CarlaEnv:
         max_x = max(spawn_locations, key= lambda x: x[0])[0]
         min_y = min(spawn_locations, key= lambda x: x[1])[1]
         max_y = max(spawn_locations, key= lambda x: x[1])[1]
-        self.observation_space = spaces.Box(low=np.array(([0.] * (len(TRAJECTORIES)) + [V_MIN, min_x, min_y]) * N_CARS), high=np.array(([1.] * (len(TRAJECTORIES)) + [V_MAX, max_x, max_y]) * N_CARS), dtype=np.float32)
+
+        self.observation_space = spaces.Box(low=np.array(([V_MIN, min_x, min_y, min_x, min_y]) * N_CARS), high=np.array(([V_MAX, max_x, max_y, max_x, max_y]) * N_CARS), dtype=np.float32)
+        
+        # car_observation_space = spaces.Dict({
+        #     'continuous': spaces.Box(low=np.array([min_x, min_y, V_MIN]),
+        #                             high=np.array([max_x, max_y, V_MAX]),
+        #                             dtype=float),
+        #     'path': spaces.Discrete(len(TRAJECTORIES))
+        # })
+
+        # # Combine individual car observation spaces into a Dict
+        # self.observation_space = spaces.Tuple([car_observation_space] * N_CARS)
         settings = self.world.get_settings()
         settings.fixed_delta_seconds = FIXED_TIME_STEP
         self.world.apply_settings(settings)
@@ -181,13 +204,21 @@ class CarlaEnv:
 
 
     def spawn_n_cars(self):
+        paths_to_choose = [0,4,7,10]
         chosen_directions = []
         for i in range(N_CARS):
             direction = random.randint(0, 3)
             while direction in chosen_directions:
                 direction = random.randint(0, 3)
             chosen_directions.append(direction)
-            trajectory = random.choice(TRAJECTORIES[direction*3: direction*3 +3])
+            trajectory = random.choice(TRAJECTORIES[direction*2: direction*2 +2])
+            # trajectory = TRAJECTORIES[paths_to_choose[i]]
+
+            # direction = random.randint(0, 3)
+            # while direction in chosen_directions:
+            #     direction = random.randint(0, 3)
+            # chosen_directions.append(direction)
+            # trajectory = TRAJECTORIES[paths_to_choose[direction]]
             path = self.create_path(trajectory[1])
 
             car_actor = self.spawn_vehicle(trajectory[0])
@@ -240,6 +271,12 @@ class CarlaEnv:
         angle_degrees = (angle_degrees + 360) % 360
 
         return angle_degrees
+    
+    def calculate_distance(self, start_point, end_point):
+        delta_x = end_point.x - start_point.x
+        delta_y = end_point.y - start_point.y
+        return math.sqrt(delta_x ** 2 + delta_y ** 2)
+
 
     def calculate_time_with_acceleration(self, acceleration, initial_velocity, initial_displacement):
         a = 1
@@ -259,58 +296,119 @@ class CarlaEnv:
         if t < 0:
             return t2
         return t1
-
-        
-
-    def follow_path_with_velocity(self, vehicle_data, car_idx, throttle, brake, acceleration, stop):
-        # print(f'new acc applied: {throttle} for car {car_idx}')
+    
+    def follow_path_with_velocity(self, vehicle_data, car_idx, time_to_intersection):
+        cnt = 0
         vehicle = vehicle_data["carla_car"]
-        path = vehicle_data["path"] 
+        path = vehicle_data["path"]
         velocity = vehicle_data["velocity"]
-        start_index = self.vehicles[car_idx]["start_index"]
-        # print(path)
-        # print(vehicle_data["start_index"])
-        for location in path[start_index:]:
-            # if abs(self.calculate_yaw_angle_to_target(vehicle.get_location(), location) - vehicle.get_transform().rotation.yaw) > 90:
-            #     continue
+        distance_to_intersection = self.calculate_distance(path[1], path[2])
+        new_velocity = distance_to_intersection / (time_to_intersection)
+        print(f"init vel is {velocity} and new vel is {new_velocity}")
+        
+        start_time = datetime.now()
+        for location in path:
+            direction = location - vehicle.get_location()
+            target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
+            target_direction_radians = math.radians(target_direction_degrees)
+            
             self.orient_vehicle_towards_target(vehicle, location)
             current_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
-            if False:
-                vehicle.apply_control(carla.VehicleControl(throttle = throttle, brake=brake))
-            else:
-                direction = location - vehicle.get_location()
-                target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
-                target_direction_radians = math.radians(target_direction_degrees)
-                target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
-                vehicle.set_target_velocity(target_velocity_vector)
+            if cnt > 1:
+                velocity = new_velocity
             
-            speed = math.sqrt(vehicle_data["carla_car"].get_velocity().x**2 + vehicle_data["carla_car"].get_velocity().y**2 + vehicle_data["carla_car"].get_velocity().z**2)
-            
+            target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
+            vehicle.set_target_velocity(target_velocity_vector)
+            cnt += 1
             while vehicle.is_alive:
-                if stop():
-                    self.vehicles[car_idx]["start_index"] = path.index(location)
-                    return
                 if not vehicle.is_alive:
                     return
                 new_angle = self.calculate_yaw_angle_to_target(vehicle.get_location(), location)
                 if abs(new_angle - current_angle) >= 90:
-                    self.vehicles[car_idx]["start_index"] += 1
                     break
                 if (datetime.now() - self.vehicles[car_idx]["start_time"]).total_seconds() > MAX_ALIVE_TIME * FIXED_TIME_STEP:
-                    print('timedout')
                     self.destroy_actor(vehicle_data)
                     return
-            self.vehicles[car_idx]["start_index"] = path.index(location)
-            
-        
-        if abs(self.calculate_yaw_angle_to_target(vehicle.get_location(), path[-1]) - vehicle.get_transform().rotation.yaw) > 90 and \
-            self.vehicles[car_idx]["start_index"] >= len(path)-1:
-            self.vehicles[car_idx]["total_time"] = (datetime.now() - self.vehicles[car_idx]["start_time"]).total_seconds()
-            print('reached destination')
-            self.destroy_actor(vehicle_data)
-            return
+            # time.sleep(FIXED_TIME_STEP * direction.length() / velocity)
+            # if (datetime.now() - start_time).total_seconds() > 20 * FIXED_TIME_STEP:
+            #     self.destroy_actor(vehicle_data)
+            #     return
+        self.vehicles[car_idx]["total_time"] = (datetime.now() - start_time).total_seconds()
+        self.destroy_actor(vehicle_data)
 
-    def action(self, acc_list):
+        
+
+    # def follow_path_with_velocity(self, vehicle_data, car_idx, time_to_reach_intersection):
+    #     print(f"time to reach: {time_to_reach_intersection}")
+    #     cnt = 0
+    #     vehicle = vehicle_data["carla_car"]
+    #     path = vehicle_data["path"]
+    #     velocity = vehicle_data["velocity"]
+    #     start_time = datetime.now()
+    #     distance_to_intersection = self.calculate_distance(path[1], path[2])
+    #     new_velocity = distance_to_intersection / (time_to_reach_intersection)
+    #     print(f"init vel is {velocity} and new vel is {new_velocity}")
+    #     for location in path:
+    #         # if cnt > 1:
+    #         #     velocity = new_velocity
+    #         # direction = location - vehicle.get_location()
+    #         # target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
+    #         # target_direction_radians = math.radians(target_direction_degrees)
+    #         # target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
+
+    #         # self.orient_vehicle_towards_target(vehicle, location)
+            
+    #         #     # vehicle.apply_control(carla.VehicleControl(throttle = 0.3))
+            
+    #         # # direction = location - vehicle.get_location()
+    #         # # target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
+    #         # # target_direction_radians = math.radians(target_direction_degrees)
+    #         # # target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
+    #         # vehicle.set_target_velocity(target_velocity_vector)
+    #         # cnt += 1
+    #         # # time.sleep(direction.length() / velocity)
+    #         # speed = math.sqrt(vehicle_data["carla_car"].get_velocity().x**2 + vehicle_data["carla_car"].get_velocity().y**2 + vehicle_data["carla_car"].get_velocity().z**2)
+
+
+    #         # # if speed <= 0:
+    #         # #     time_to_sleep = 20
+    #         # # else:
+
+    #         # #     time_to_sleep = FIXED_TIME_STEP *  direction.length() / velocity
+    #         # #     if time_to_sleep < 0:
+    #         # #         time_to_sleep = 21
+    #         # #     else:
+    #         # #         time_to_sleep = np.clip(time_to_sleep, 0, 20)
+    #         # # print(f'Car from {vehicle_data["path_idx"]} sleeping for {time_to_sleep} sec. It is convering a distance of {direction.length()} with a speed of {speed} and {vehicle_data["carla_car"].get_velocity().length()}')
+
+    #         # time.sleep(direction.length() / velocity)
+    #         # if (datetime.now() - start_time).total_seconds() > 20:
+    #         #     # print('Took too long ', str((datetime.now() - start_time).total_seconds() ))
+    #         #     self.destroy_actor(vehicle_data)
+    #         #     return
+
+    #         direction = location - vehicle.get_location()
+    # #         forward_vector = carla.Vector3D(x=1.0, y=0.0, z=0.0)
+    # #         velocity_vector = direction / direction.length() * velocity
+    #         target_direction_degrees = self.calculate_target_direction_degrees(vehicle.get_location(), location)
+    #         target_direction_radians = math.radians(target_direction_degrees)
+    #         target_velocity_vector = carla.Vector3D(x=math.cos(target_direction_radians), y=math.sin(target_direction_radians), z=0.0) * velocity
+        
+    # #         vehicle.set_transform(carla.Transform(vehicle.get_location(), carla.Rotation(target_direction_degrees)))
+    # #         vehicle.set_target_angular_velocity(target_velocity_vector)
+    #         self.orient_vehicle_towards_target(vehicle, location)
+    #         if cnt > 1:
+    #             vehicle.apply_control(carla.VehicleControl(throttle = 0.3))
+    #         else:
+    #             vehicle.set_target_velocity(target_velocity_vector)
+    # #         vehicle.set_transform(carla.Transform(vehicle.get, carla.Rotation()))
+    #         cnt += 1
+    #         time.sleep(direction.length() / velocity)  # Adjust sleep time based on the desired simulation frequency
+    #     # print(f'Car from {vehicle_data["path_idx"]} has reached destination.')
+    #     self.destroy_actor(vehicle_data)
+    #     self.vehicles[car_idx]["total_time"] = (datetime.now() - start_time).total_seconds()
+
+    def action(self, time_list):
         '''The car can take any of the ACTION_SPACE_SIZE possible throttle values from A_MIN to A_MAX'''
 
         # TODO: This is when we run the entire simulation by applying respective accelerations 
@@ -318,19 +416,19 @@ class CarlaEnv:
 
         thread_list = []
         stop_thread = False
-        accelerations = [ACC_MAP[a] for a in acc_list]
+        # accelerations = [ACC_MAP[a] for a in acc_list]
         for i, car_dict in enumerate(self.vehicles):
-            if car_dict["carla_car"].is_alive:
-                if accelerations[i] > 0:
-                    throttle = np.clip(accelerations[i] / 10, 0, 1)
-                    brake = 0
-                else:
-                    throttle = 0
-                    brake = np.clip(-accelerations[i] / 20, 0, 1)
+            # if car_dict["carla_car"].is_alive:
+                # if accelerations[i] > 0:
+                #     throttle = np.clip(accelerations[i] / 10, 0, 1)
+                #     brake = 0
+                # else:
+                #     throttle = 0
+                #     brake = np.clip(-accelerations[i] / 20, 0, 1)
 
                 
                 # print(f'Acc for car {i} is {accelerations[i]} and the throttle is {throttle} and brake is {brake}')
-                thread_list.append(threading.Thread(target=self.follow_path_with_velocity, args=(car_dict, i , float(throttle), float(brake), accelerations[i], lambda: stop_thread)))
+            thread_list.append(threading.Thread(target=self.follow_path_with_velocity, args=(car_dict, i , time_list[i])))
         
 
         for t in thread_list:
@@ -340,16 +438,16 @@ class CarlaEnv:
         #     if t.is_alive():
         #         print('timeout')
         #         t.join(0)
-        time.sleep(0.1)
-        stop_thread = True
+        # time.sleep(0.1)
+        # stop_thread = True
         for t in thread_list:
             t.join()
         
-        for v in self.vehicles:
-            if v["carla_car"].is_alive:
-                v["location_x"] = v["carla_car"].get_location().x
-                v["location_y"] = v["carla_car"].get_location().y
-        # self.destroy_all_actors()
+        # for v in self.vehicles:
+        #     if v["carla_car"].is_alive:
+        #         v["location_x"] = v["carla_car"].get_location().x
+        #         v["location_y"] = v["carla_car"].get_location().y
+        self.destroy_all_actors()
         
 
     def destroy_all_actors(self):
@@ -378,62 +476,80 @@ class CarlaEnv:
         self.episode_step = 0
         self.collision = False
 
+        # state = []
+        # for v in self.vehicles:
+        #     state.append({'continuous': np.array([v["location_x"], v["location_y"], v["velocity"]]), 'path': v["path_idx"]})
+       
         state = []
         for v in self.vehicles:
-            state.extend(self.convert_to_onehot(v["path_idx"]))
             state.append(v["velocity"])
             state.append(v["location_x"])
             state.append(v["location_y"])
+            state.append(v["path"][-1].x)
+            state.append(v["path"][-1].y)
         return np.array(state)
+        # return state
 
-    def step(self, acc_list):
+    def step(self, time_list):
         '''Apply respective acceleration for each car'''
 
         self.episode_step += 1
-        self.action(acc_list)
+        self.action(time_list)
 
         if self.collision:
             reward = -COLLISION_PENALTY
             state = []
             for v in self.vehicles:
-                state.extend(self.convert_to_onehot(v["path_idx"]))
                 state.append(v["velocity"])
                 state.append(v["location_x"])
                 state.append(v["location_y"])
+                state.append(v["path"][-1].x)
+                state.append(v["path"][-1].y)
             
             print('Reward for episode: ', str(reward))
             self.reward = reward
-            return np.array(state), reward, True, {}
+            return state, reward, True, {}
 
-        if len([v for v in self.vehicles if v["carla_car"].is_alive]) == 0:
-            # the reward for completion is inversely proportional to the total time it took to traverse the intersection
+        # if len([v for v in self.vehicles if v["carla_car"].is_alive]) == 0:
+        else:
+            # # the reward for completion is inversely proportional to the total time it took to traverse the intersection
             reached_destination = [car for car in self.vehicles if car["total_time"]>0]
             rewards_reached_destination = [DESTINATION_REWARD * (FIXED_TIME_STEP / car["total_time"]) for car in reached_destination]
             reward = sum(rewards_reached_destination)
-            reward -= DID_NOT_REACH_PENALTY * (len(self.vehicles) - len(reached_destination))
+            did_not_reach = [car for car in self.vehicles if car["total_time"]<=0]
+            did_not_reach_penalty = [DID_NOT_REACH_PENALTY * (len(v["path"]) - v["start_index"]) for v in did_not_reach]
+            reward -= sum(did_not_reach_penalty)
+            # state = []
+            # for v in self.vehicles:
+            #     state.append({'continuous': np.array([v["location_x"], v["location_y"], v["velocity"]]), 'path': v["path_idx"]})
+
+            # reward = 0 
+            # reward += len([car for car in self.vehicles if car["total_time"]>0]) * DESTINATION_REWARD
+            # reward -= (len(self.vehicles) - len([car for car in self.vehicles if car["total_time"]>0])) * DID_NOT_REACH_PENALTY
             state = []
             for v in self.vehicles:
-                state.extend(self.convert_to_onehot(v["path_idx"]))
                 state.append(v["velocity"])
                 state.append(v["location_x"])
                 state.append(v["location_y"])
+                state.append(v["path"][-1].x)
+                state.append(v["path"][-1].y)
             
             print('Reward for episode: ', str(reward))
             self.reward = reward
             return np.array(state), reward, True, {}
+            # return state, reward, True, {}
         
         reward = -1
-        state = []
-        for v in self.vehicles:
-            state.extend(self.convert_to_onehot(v["path_idx"]))
-            state.append(v["velocity"])
-            state.append(v["location_x"])
-            state.append(v["location_y"])
+        # waypoints_left = [len(v["path"]) - v["start_index"] for v in self.vehicles]
+        # reward = 0.005 * (sum(waypoints_left) / len(waypoints_left))
+        # state = []
+        # for v in self.vehicles:
+        #     state.append({'continuous': np.array([v["location_x"], v["location_y"], v["velocity"]]), 'path': v["path_idx"]})
         
         # print('Reward for episode: ', str(reward))
         self.reward = reward
         # print('intermediate state')
-        return np.array(state), reward, False, {}
+        return state, reward, False, {}
             
 
        
@@ -484,7 +600,7 @@ class MyCallback(BaseCallback):
     
     def _on_rollout_end(self) -> None:
         # This method will be called at the end of each episode
-        print(f"Num timesteps: {self.num_timesteps}, \
+        print(f"Num timesteps: {self.num_steps}, \
             episode reward: {self.reward_per_episode}, \
               average total time: {self.episode_total_time / self.num_steps}, \
               collision: {self.episode_collision}")
@@ -495,6 +611,11 @@ class MyCallback(BaseCallback):
         # # Write to file
         # with open(filename, "a") as f:
         #     f.write(results)
+
+        # log metrics to wandb
+        wandb.log({"reward_per_episode": self.reward_per_episode, 
+                   "average_time_taken": self.episode_total_time / self.num_steps,
+                   "episode_collision": self.episode_collision})
         
         self.reward_per_episode = 0  # Reset episode reward for the next episode
         self.episode_total_time = 0
@@ -524,10 +645,17 @@ def main():
 
     print("Execution started")
     # e = CarlaEnv()
-    n_steps = 20
-    total_train_time = 600
-    n_episodes = total_train_time // 20
-    total_timesteps = n_steps * n_episodes
+    n_steps = 128
+    train_time = 1_000
+    num_iter = 5
+
+    wandb.init(
+        project="cims",
+        config={
+            "n_steps": n_steps,
+            "total_train_time": train_time * num_iter,
+        }
+    )
     
 
     if not os.path.isdir('models'):
@@ -547,20 +675,22 @@ def main():
     callback = MyCallback()
     # logger = configure("/logs/", ["stdout", "csv", "tensorboard"])
 
-
-    model = PPO("MlpPolicy", wrapped_env, verbose=1, policy_kwargs=dict(net_arch=[64,64]), tensorboard_log="logs")
+    policy_kwargs = dict(net_arch=dict(pi=[128, 256, 256, 128, 128, 64], vf=[128, 256, 256, 128, 128, 64]))
+    model = PPO("MlpPolicy", wrapped_env, verbose=10, policy_kwargs=policy_kwargs, tensorboard_log="logs", n_steps=n_steps)
     # model.set_logger(logger)
-
+    start_iter = 0
     if args.saved != 'None':
+        start_iter = int(args.saved.split('_')[2]) + 1
         model.load(args.saved)
     if args.train == 'True':
-        for i in range(10):
-            model.learn(total_timesteps=10000, progress_bar=True, callback = callback, tb_log_name="PPO_new", reset_num_timesteps= False)
+        for i in range(start_iter, start_iter + num_iter):
+            model.learn(total_timesteps=train_time, progress_bar=True, callback = callback, tb_log_name="Cims_v13", reset_num_timesteps= False)
             current_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
             model.save(f"models/cims_model_{i}_{current_timestamp}")
 
     print('Done')
     wrapped_env.destroy()
+    wandb.finish()
 
 
 
